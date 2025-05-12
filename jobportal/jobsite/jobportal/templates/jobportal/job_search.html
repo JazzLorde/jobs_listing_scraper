@@ -1,0 +1,40 @@
+<form method="get" action="{% url 'job_search' %}">
+    <input type="text" name="keyword" placeholder="Search jobs..." value="{{ keyword }}">
+    
+    <select name="platform">
+        <option value="">All Platforms</option>
+        <option value="Indeed" {% if platform == 'Indeed' %}selected{% endif %}>Indeed</option>
+        <option value="LinkedIn" {% if platform == 'LinkedIn' %}selected{% endif %}>LinkedIn</option>
+        <option value="JobStreet" {% if platform == 'JobStreet' %}selected{% endif %}>JobStreet</option>
+    </select>
+
+    <select name="employment_type">
+        <option value="">All Types</option>
+        <option value="Full-time" {% if employment_type == 'Full-time' %}selected{% endif %}>Full-time</option>
+        <option value="Part-time" {% if employment_type == 'Part-time' %}selected{% endif %}>Part-time</option>
+        <option value="Contract" {% if employment_type == 'Contract' %}selected{% endif %}>Contract</option>
+    </select>
+
+    <select name="remote_option">
+        <option value="">Any</option>
+        <option value="Remote" {% if remote_option == 'Remote' %}selected{% endif %}>Remote</option>
+        <option value="Hybrid" {% if remote_option == 'Hybrid' %}selected{% endif %}>Hybrid</option>
+        <option value="On-site" {% if remote_option == 'On-site' %}selected{% endif %}>On-site</option>
+    </select>
+
+    <button type="submit">Search</button>
+</form>
+
+<hr>
+
+{% for job in jobs %}
+    <div>
+        <h3><a href="{{ job.job_url }}" target="_blank">{{ job.job_title }}</a></h3>
+        <p>{{ job.company_name }} | {{ job.location }}</p>
+        <p>{{ job.employment_type }} | {{ job.remote_option }} | {{ job.platform }}</p>
+        <p>Posted: {{ job.posted_date }}</p>
+    </div>
+    <hr>
+{% empty %}
+    <p>No jobs found matching your search.</p>
+{% endfor %}

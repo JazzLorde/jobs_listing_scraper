@@ -386,6 +386,8 @@ if __name__ == "__main__":
     ]
     for keyword in keywords:
         scrape_indeed(keyword)
+        scrape_linkedin(keyword)
+        scrape_jobstreet(keyword)
 
 
 

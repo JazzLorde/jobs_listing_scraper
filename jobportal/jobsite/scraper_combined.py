@@ -122,6 +122,13 @@ def get_chrome_driver():
     return driver
 
 
+def clear_scraped_jobs():
+    try:
+        deleted_count, _ = ScrapedJob.objects.all().delete()
+        print(f"🧹 Cleared {deleted_count} existing job entries from the database.")
+    except Exception as e:
+        print(f"❌ Failed to clear job data: {e}")
+
 
 def test_proxy_connection():
     print("🧪 Testing proxy connection using https://ipinfo.io/json..")
@@ -137,17 +144,17 @@ def test_proxy_connection():
 
 def save_job(**kwargs):
     try:
-        ScrapedJob.objects.get_or_create(
+        obj, created = ScrapedJob.objects.get_or_create(
             job_url=kwargs['job_url'],
             defaults={**kwargs}
         )
+        if created:
+            print(f"✅ Saved new job: {kwargs['job_title']} at {kwargs['company_name']}")
+        else:
+            print(f"⚠️ Duplicate job skipped: {kwargs['job_title']} at {kwargs['company_name']}")
     except Exception as e:
         print(f"❌ Django ORM save error: {e}")
 
-
-
-import json
-from selenium.webdriver.common.action_chains import ActionChains
 
 def scrape_indeed(keyword):
     print(f"\n📍 Scraping Indeed for: {keyword}")
@@ -166,7 +173,7 @@ def scrape_indeed(keyword):
 
     for page in range(0, 30, 10):
         search_url = f"{base_url}/jobs?q={keyword.replace(' ', '+')}&l=Philippines&start={page}"
-        driver = get_chrome_driver()
+        driver.get(search_url)
 
         time.sleep(random.uniform(8, 12))
         human_like_scroll(driver)
@@ -213,10 +220,33 @@ def scrape_indeed(keyword):
             except:
                 location = "N/A"
 
-            page_text = driver.page_source.lower()
-            employment_type = "Full-time" if "full-time" in page_text else "Part-time" if "part-time" in page_text else "Contract" if "contract" in page_text else "Not specified"
-            seniority_level = "Entry level" if "entry level" in job_title else "Associate" if "associate" in job_title else "Manager" if "manager" in job_title else "Senior" if "senior" in job_title else "Not specified"
-            remote_option = "Remote" if "remote" in page_text else "Hybrid" if "hybrid" in page_text else "On-site" if "on-site" in page_text or "on site" in page_text else "Not specified" 
+            try:
+                job_description = driver.find_element(By.ID, "jobDescriptionText").text.lower()
+            except:
+                job_description = ""
+
+            # 👇 Improved remote_option logic
+            if "hybrid" in job_description:
+                remote_option = "Hybrid"
+            elif any(k in job_description for k in ["remote", "wfh", "work from home"]):
+                remote_option = "Remote"
+            else:
+                remote_option = "On-site"
+
+            employment_type = (
+                "Full-time" if "full-time" in job_description else
+                "Part-time" if "part-time" in job_description else
+                "Contract" if "contract" in job_description else
+                "Not specified"
+            )
+
+            seniority_level = (
+                "Entry level" if "entry level" in job_title else
+                "Associate" if "associate" in job_title else
+                "Manager" if "manager" in job_title else
+                "Senior" if "senior" in job_title else
+                "Not specified"
+            )
 
             if posted_date == "N/A":
                 posted_date = None
@@ -230,7 +260,7 @@ def scrape_indeed(keyword):
             )
         except Exception as e:
             print(f"❌ Error scraping Indeed job: {e}")
-    driver.quit()
+
 
 
 def scrape_jobstreet(keyword):
@@ -271,7 +301,15 @@ def scrape_jobstreet(keyword):
             employment_type = work_type.a.text.strip() if work_type and work_type.a else "N/A"
 
             text = soup.get_text().lower()
-            remote_option = "Remote" if "remote" in text else "Hybrid" if "hybrid" in text else "On-site"
+            combined_text = f"{job_title.lower()} {text}"
+
+            if any(k in combined_text for k in ["remote", "wfh", "work from home"]):
+                remote_option = "Remote"
+            elif "hybrid" in combined_text:
+                remote_option = "Hybrid"
+            else:
+                remote_option = "On-site"            
+                
             seniority_level = "Entry level" if "entry level" in text else "Associate" if "associate" in text else "Manager" if "manager" in text else "Senior" if "senior" in text else "Not specified"
 
             if posted_date == "N/A":
@@ -316,13 +354,22 @@ def scrape_linkedin(keyword):
     for job in job_cards[:50]:
         try:
             job.click()
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CLASS_NAME, 'description__text'))
+            )
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_all_elements_located((By.CLASS_NAME, 'description__job-criteria-text'))
+            )
             time.sleep(random.uniform(2, 4))
             title = job.find_element(By.CLASS_NAME, 'base-search-card__title').text.strip()
             company = job.find_element(By.CLASS_NAME, 'base-search-card__subtitle').text.strip()
             location = job.find_element(By.CLASS_NAME, 'job-search-card__location').text.strip()
             link = job.find_element(By.TAG_NAME, 'a').get_attribute('href')
 
-            job_text = driver.page_source.lower()
+            description_element = driver.find_element(By.CLASS_NAME, 'description__text')
+            job_description = description_element.text.lower()
+            combined_text = f"{title.lower()} {job_description}"
+
             posted_date = linkedin_format_posted_date(driver.find_element(By.CLASS_NAME, 'posted-time-ago__text').text.strip())
 
             employment_type = "N/A"
@@ -335,7 +382,12 @@ def scrape_linkedin(keyword):
             except:
                 pass
 
-            remote_option = "Remote" if "remote" in job_text else "Hybrid" if "hybrid" in job_text else "On-site"
+            if "hybrid" in combined_text:
+                remote_option = "Hybrid"
+            elif any(k in combined_text for k in ["remote", "wfh", "work from home"]):
+                remote_option = "Remote"
+            else:
+                remote_option = "On-site"
 
 
             if posted_date == "N/A":
@@ -380,14 +432,15 @@ def linkedin_format_posted_date(text):
 
 # === Main Entry ===
 if __name__ == "__main__":
-    test_proxy_connection()
+#    test_proxy_connection()
+    clear_scraped_jobs()
     keywords = [
-        "Financial Management",
+        "Business Analyst",
     ]
     for keyword in keywords:
-        scrape_indeed(keyword)
         scrape_linkedin(keyword)
         scrape_jobstreet(keyword)
+        scrape_indeed(keyword)
 
 
 

@@ -1,0 +1,14 @@
+Django==4.2.5
+djangorestframework==3.14.0
+django-cors-headers==3.10.0
+django-crispy-forms==2.1
+psycopg2-binary==2.9.9
+undetected-chromedriver==3.5.5
+selenium==4.29.0
+selenium-stealth==1.0.6
+beautifulsoup4==4.12.2
+requests==2.31.0
+pandas==2.2.2
+openpyxl==3.1.2
+python-dotenv==1.0.0
+fake-useragent==2.1.0

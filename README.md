@@ -36,15 +36,20 @@ manage.py
 
 
 2. Create a virtual environment and activate it:
+   ```bash
    python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-3. Install dependencies:
+4. Install dependencies:
+
+   ```bash
    pip install -r requirements.txt
 
-4. Configure database settings in jobsite/settings.py or use .env.
+6. Configure database settings in jobsite/settings.py or use .env.
 
-5. Run migrations:
+7. Run migrations:
+
+  ```bash
    python manage.py makemigrations
    python manage.py migrate
 

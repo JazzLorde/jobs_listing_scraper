@@ -13,6 +13,8 @@ from selenium_stealth import stealth
 from selenium.webdriver.common.action_chains import ActionChains
 import re
 import json
+import random
+
 
 
 # Setup Django environment
@@ -21,113 +23,36 @@ django.setup()
 
 from jobportal.models import ScrapedJob  # import your Django model
 
-# === Proxy Config ===
-PROXY_HOST = "brd.superproxy.io"
-PROXY_PORT = 33335
-PROXY_USER = "brd-customer-hl_9f14443b-zone-final_job_scraper"
-PROXY_PASS = "6rtces3omqbs"
-
-
-def create_proxy_auth_extension(proxy_host, proxy_port, proxy_user, proxy_pass):
-    manifest_json = """
-    {
-        "version": "1.0.0",
-        "manifest_version": 2,
-        "name": "Chrome Proxy",
-        "permissions": [
-            "proxy",
-            "tabs",
-            "unlimitedStorage",
-            "storage",
-            "<all_urls>",
-            "webRequest",
-            "webRequestBlocking"
-        ],
-        "background": {
-            "scripts": ["background.js"]
-        },
-        "minimum_chrome_version":"22.0.0"
-    }
-    """
-
-    background_js = f"""
-    var config = {{
-        mode: "fixed_servers",
-        rules: {{
-            singleProxy: {{
-                scheme: "http",
-                host: "{proxy_host}",
-                port: parseInt({proxy_port})
-            }},
-            bypassList: ["localhost"]
-        }}
-    }};
-
-    chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
-
-    function callbackFn(details) {{
-        return {{
-            authCredentials: {{
-                username: "{proxy_user}",
-                password: "{proxy_pass}"
-            }}
-        }};
-    }}
-
-    chrome.webRequest.onAuthRequired.addListener(
-        callbackFn,
-        {{urls: ["<all_urls>"]}},
-        ['blocking']
-    );
-    """
-
-    plugin_path = "proxy_auth_plugin.zip"
-    with zipfile.ZipFile(plugin_path, 'w') as zp:
-        zp.writestr("manifest.json", manifest_json)
-        zp.writestr("background.js", background_js)
-
-    return plugin_path
-
-
-plugin_path = create_proxy_auth_extension(
-    proxy_host=PROXY_HOST,
-    proxy_port=PROXY_PORT,
-    proxy_user=PROXY_USER,
-    proxy_pass=PROXY_PASS
-)
-
-options = uc.ChromeOptions()
-options.add_extension(plugin_path)
 
 def get_chrome_driver(load_cookies_from=None):
     options = uc.ChromeOptions()
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--start-maximized")
-    options.add_extension(plugin_path)
 
     driver = uc.Chrome(options=options)
 
-    # Optional: add stealth
-    from selenium_stealth import stealth
+    languages = [["en-US", "en"], ["en-GB", "en"], ["en"], ["en-US"]]
+    vendors = ["Google Inc.", "Apple Inc.", "Mozilla Foundation"]
+    platforms = ["Win32", "Linux x86_64", "MacIntel"]
+    renderers = ["Intel Iris OpenGL Engine", "AMD Radeon Pro", "NVIDIA GeForce", "Apple M1"]
+
     stealth(driver,
-        languages=["en-US", "en"],
-        vendor="Google Inc.",
-        platform="Win32",
-        webgl_vendor="Intel Inc.",
-        renderer="Intel Iris OpenGL Engine",
+        languages=random.choice(languages),
+        vendor=random.choice(vendors),
+        platform=random.choice(platforms),
+        webgl_vendor="Intel Inc.",  # Keep this consistent if needed
+        renderer=random.choice(renderers),
         fix_hairline=True,
     )
 
     if load_cookies_from:
         driver.get("https://ph.indeed.com")
-        time.sleep(5)  # allow cookies to load
+        time.sleep(5)
         load_cookies(driver, load_cookies_from)
         driver.refresh()
 
-
     return driver
-
 
 def clear_scraped_jobs():
     try:
@@ -135,18 +60,6 @@ def clear_scraped_jobs():
         print(f"🧹 Cleared {deleted_count} existing job entries from the database.")
     except Exception as e:
         print(f"❌ Failed to clear job data: {e}")
-
-
-def test_proxy_connection():
-    print("🧪 Testing proxy connection using https://ipinfo.io/json..")
-    try:
-        driver = get_chrome_driver()
-        driver.get("https://geo.brdtest.com/welcome.txt")
-        time.sleep(5)
-        print(driver.find_element(By.TAG_NAME, "body").text)
-        driver.quit()
-    except Exception as e:
-        print(f"❌ Proxy connection test failed: {e}")
 
 
 def save_job(**kwargs):
@@ -521,15 +434,19 @@ def linkedin_format_posted_date(text):
     if "month" in text: return (now - timedelta(days=30 * int(text.split()[0]))).strftime("%Y-%m-%d")
     return now.strftime("%Y-%m-%d")
 
+
+def manual_captcha_and_save_cookies(keyword="marketing", cookie_file="indeed_cookies.json"):
+    driver = get_chrome_driver()
+    url = f"https://ph.indeed.com/jobs?q={keyword}&l=Philippines"
+    driver.get(url)
+    input("🛑 Solve the CAPTCHA manually in the browser window, then press Enter here...")
+    save_cookies(driver, cookie_file)
+    driver.quit()
+    print("✅ Cookies saved.")
+
 # === Main Entry ===
 if __name__ == "__main__":
-    # driver = get_chrome_driver()
-    # driver.get("https://ph.indeed.com/jobs?q=marketing&l=Philippines")
-    # input("🛑 Solve the CAPTCHA manually, then press Enter here...")
-    # save_cookies(driver, "indeed_cookies.json")
-    # driver.quit()
-    # print("✅ Cookies saved.")
-    # test_proxy_connection()
+#    manual_captcha_and_save_cookies()
     clear_scraped_jobs()
 
     keywords = [

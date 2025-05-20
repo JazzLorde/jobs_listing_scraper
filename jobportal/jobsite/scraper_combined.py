@@ -11,8 +11,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from selenium_stealth import stealth
 from selenium.webdriver.common.action_chains import ActionChains
+import re
 import json
-
 
 
 # Setup Django environment
@@ -99,7 +99,7 @@ plugin_path = create_proxy_auth_extension(
 options = uc.ChromeOptions()
 options.add_extension(plugin_path)
 
-def get_chrome_driver():
+def get_chrome_driver(load_cookies_from=None):
     options = uc.ChromeOptions()
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -118,6 +118,13 @@ def get_chrome_driver():
         renderer="Intel Iris OpenGL Engine",
         fix_hairline=True,
     )
+
+    if load_cookies_from:
+        driver.get("https://ph.indeed.com")
+        time.sleep(5)  # allow cookies to load
+        load_cookies(driver, load_cookies_from)
+        driver.refresh()
+
 
     return driver
 
@@ -156,9 +163,24 @@ def save_job(**kwargs):
         print(f"❌ Django ORM save error: {e}")
 
 
-def scrape_indeed(keyword):
+def contains_keyword(text, keywords):
+    return any(re.search(rf"\b{k}\b", text) for k in keywords)
+
+
+def save_cookies(driver, filename):
+    with open(filename, 'w') as f:
+        json.dump(driver.get_cookies(), f)
+
+def load_cookies(driver, filename):
+    with open(filename, 'r') as f:
+        cookies = json.load(f)
+        for cookie in cookies:
+            driver.add_cookie(cookie)
+
+
+def scrape_indeed(keyword, driver):
+    MAX_JOBS = 3  # ✅ Desired number of job cards to scrape
     print(f"\n📍 Scraping Indeed for: {keyword}")
-    driver = get_chrome_driver()
     actions = ActionChains(driver)
     base_url = "https://ph.indeed.com"
     collected_jobs = []
@@ -166,20 +188,26 @@ def scrape_indeed(keyword):
     def human_like_scroll(driver):
         total_height = driver.execute_script("return document.body.scrollHeight")
         scroll_points = random.randint(5, 10)
-        for i in range(scroll_points):
+        for _ in range(scroll_points):
             scroll_distance = total_height // scroll_points
             driver.execute_script(f"window.scrollBy(0, {scroll_distance});")
             time.sleep(random.uniform(0.5, 1.5))
 
-    for page in range(0, 30, 10):
+    # 🔁 Scrape search result pages until max jobs are collected
+    for page in range(0, 100, 10):  # 10 pages max as safety cap
+        if len(collected_jobs) >= MAX_JOBS:
+            break
+
         search_url = f"{base_url}/jobs?q={keyword.replace(' ', '+')}&l=Philippines&start={page}"
         driver.get(search_url)
-
         time.sleep(random.uniform(8, 12))
         human_like_scroll(driver)
 
         job_cards = driver.find_elements(By.CLASS_NAME, "job_seen_beacon")
+
         for card in job_cards:
+            if len(collected_jobs) >= MAX_JOBS:
+                break
             try:
                 driver.execute_script("arguments[0].scrollIntoView(true);", card)
                 actions.move_to_element(card).perform()
@@ -189,26 +217,26 @@ def scrape_indeed(keyword):
                 job_title = title_elem.text.strip()
                 job_link = title_elem.get_attribute("href")
                 job_link = job_link if job_link.startswith("http") else base_url + job_link
+
                 try:
                     company = card.find_element(By.CSS_SELECTOR, '[data-testid="company-name"]').text.strip()
                 except:
                     company = "N/A"
+
                 try:
-                    posted_text = card.find_element(By.CLASS_NAME, 'date').text.strip()
+                    posted_elem = card.find_element(By.XPATH, './/span[contains(@class, "date")]')
+                    posted_text = posted_elem.text.strip()
                     posted_date = convert_posted_date_indeed(posted_text)
                 except:
                     posted_date = "N/A"
+
                 collected_jobs.append((job_title, company, job_link, posted_date))
             except:
                 continue
 
         time.sleep(random.uniform(3, 6))
 
-    driver.quit()
-    time.sleep(10)
-    driver = get_chrome_driver()
-    actions = ActionChains(driver)
-
+    # 🧭 Second stage: Visit individual job pages (reuse same driver)
     for job_title, company, job_url, posted_date in collected_jobs:
         try:
             driver.get(job_url)
@@ -225,8 +253,17 @@ def scrape_indeed(keyword):
             except:
                 job_description = ""
 
-            # 👇 Improved remote_option logic
-            if "hybrid" in job_description:
+            combined_text = f"{job_title.lower()} {job_description}"
+            location_lower = location.lower()
+
+            if any(k in job_description for k in [
+                "not remote", "not wfh", "not work from home", "not a hybrid role",
+                "must work in office", "in the office full time", "on-site only", "office based", "office base"
+            ]):
+                remote_option = "On-site"
+            elif any(k in location_lower for k in ["remote", "wfh", "work from home"]):
+                remote_option = "Remote"
+            elif "hybrid" in job_description:
                 remote_option = "Hybrid"
             elif any(k in job_description for k in ["remote", "wfh", "work from home"]):
                 remote_option = "Remote"
@@ -240,13 +277,29 @@ def scrape_indeed(keyword):
                 "Not specified"
             )
 
-            seniority_level = (
-                "Entry level" if "entry level" in job_title else
-                "Associate" if "associate" in job_title else
-                "Manager" if "manager" in job_title else
-                "Senior" if "senior" in job_title else
-                "Not specified"
-            )
+            if contains_keyword(job_title.lower(), ["manager", "director", "executive", "lead", "head", "officer", "team leader"]):
+                seniority_level = "Mid-Senior level"
+            elif contains_keyword(combined_text, ["associate", "specialist", "coordinator", "1 year", "2 years", "3 years"]):
+                seniority_level = "Associate"
+            elif contains_keyword(combined_text, ["intern", "internship"]):
+                seniority_level = "Intern"
+            elif contains_keyword(combined_text, ["fresh graduate", "entry-level", "assistant", "Bachelor's"]):
+                seniority_level = "Entry-level"
+            else:
+                seniority_level = "Not specified"
+
+            # 🔁 Fallback: Try to get posted_date from JSON-LD in detail page
+            if posted_date == "N/A" or posted_date is None:
+                try:
+                    soup = BeautifulSoup(driver.page_source, 'html.parser')
+                    script_tag = soup.find('script', type='application/ld+json')
+                    if script_tag:
+                        json_data = json.loads(script_tag.text)
+                        posted_raw = json_data.get("datePosted")
+                        if posted_raw:
+                            posted_date = posted_raw[:10]  # format: YYYY-MM-DD
+                except Exception as e:
+                    print(f"⚠️ Failed to extract posted date from job detail JSON: {e}")
 
             if posted_date == "N/A":
                 posted_date = None
@@ -261,27 +314,38 @@ def scrape_indeed(keyword):
         except Exception as e:
             print(f"❌ Error scraping Indeed job: {e}")
 
+    driver.quit()
+
 
 
 def scrape_jobstreet(keyword):
+    MAX_JOBS = 3  # INPUT NUMBER OF JOBS
     print(f"\n📍 Scraping JobStreet for: {keyword}")
     driver = get_chrome_driver()
-    page_urls = [f"https://ph.jobstreet.com/{keyword.lower().replace(' ', '-')}-jobs?page={i}" for i in range(1,4)]
     all_jobs = []
+    page = 1
 
-    for url in page_urls:
+    while len(all_jobs) < MAX_JOBS:
+        url = f"https://ph.jobstreet.com/{keyword.lower().replace(' ', '-')}-jobs?page={page}"
         driver.get(url)
         time.sleep(random.uniform(5, 7))
         soup = BeautifulSoup(driver.page_source, "html.parser")
         jobs = soup.select('a[data-automation="jobTitle"]')
 
+        if not jobs:
+            break  
+
         for job in jobs:
+            if len(all_jobs) >= MAX_JOBS:
+                break
             href = job['href'].split("#")[0]
             job_url = "https://ph.jobstreet.com" + href
             posted_tag = job.find_next('span', attrs={"data-automation": "jobListingDate"})
             raw_posted = posted_tag.text.strip().replace("Posted ", "") if posted_tag else "N/A"
             posted_date = convert_posted_date_jobstreet(raw_posted)
             all_jobs.append((job_url, posted_date))
+
+        page += 1
 
     driver.quit()
     time.sleep(2)
@@ -308,25 +372,42 @@ def scrape_jobstreet(keyword):
             elif "hybrid" in combined_text:
                 remote_option = "Hybrid"
             else:
-                remote_option = "On-site"            
-                
-            seniority_level = "Entry level" if "entry level" in text else "Associate" if "associate" in text else "Manager" if "manager" in text else "Senior" if "senior" in text else "Not specified"
+                remote_option = "On-site"
+
+            if contains_keyword(job_title.lower(), ["manager", "director", "executive", "lead", "head", "officer"]):
+                seniority_level = "Mid-Senior level"
+            elif contains_keyword(combined_text, ["associate", "specialist", "coordinator","1 year", "2 years", "3 years"]):
+                seniority_level = "Associate"
+            elif contains_keyword(combined_text, ["intern", "internship"]):
+                seniority_level = "Intern"
+            elif contains_keyword(combined_text, ["fresh graduate", "entry-level", "assistant"]):
+                seniority_level = "Entry-level"
+            else:
+                seniority_level = "Not specified"
 
             if posted_date == "N/A":
                 posted_date = None
 
             save_job(
-                job_title=job_title, company_name=company, location=location,
-                job_url=job_url, employment_type=employment_type,
-                remote_option=remote_option, posted_date=posted_date,
-                platform="JobStreet", keyword=keyword, seniority_level=seniority_level,
+                job_title=job_title,
+                company_name=company,
+                location=location,
+                job_url=job_url,
+                employment_type=employment_type,
+                remote_option=remote_option,
+                posted_date=posted_date,
+                platform="JobStreet",
+                keyword=keyword,
+                seniority_level=seniority_level,
                 scraped_at=datetime.now()
             )
         except Exception as e:
             print(f"❌ Error scraping JobStreet job: {e}")
-    driver.quit()
 
+    driver.quit()
+    
 def scrape_linkedin(keyword):
+    MAX_JOBS = 3  # ✅ Desired number of jobs to scrape
     print(f"\n📍 Scraping LinkedIn for: {keyword}")
     driver = get_chrome_driver()
     driver.get(f"https://www.linkedin.com/jobs/search/?keywords={keyword.replace(' ', '%20')}&location=Philippines")
@@ -345,13 +426,19 @@ def scrape_linkedin(keyword):
     except:
         pass
 
-    for _ in range(3):
+    # 🔁 Scroll until enough cards are loaded
+    total_scrolls = 0
+    while True:
+        job_cards = driver.find_elements(By.CLASS_NAME, 'base-card')
+        if len(job_cards) >= MAX_JOBS or total_scrolls >= 10:
+            break
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(random.uniform(3, 6))
+        time.sleep(random.uniform(3, 5))
+        total_scrolls += 1
 
-    job_cards = driver.find_elements(By.CLASS_NAME, 'base-card')
+    job_cards = driver.find_elements(By.CLASS_NAME, 'base-card')[:MAX_JOBS]
 
-    for job in job_cards[:50]:
+    for job in job_cards:
         try:
             job.click()
             WebDriverWait(driver, 10).until(
@@ -361,6 +448,7 @@ def scrape_linkedin(keyword):
                 EC.presence_of_all_elements_located((By.CLASS_NAME, 'description__job-criteria-text'))
             )
             time.sleep(random.uniform(2, 4))
+
             title = job.find_element(By.CLASS_NAME, 'base-search-card__title').text.strip()
             company = job.find_element(By.CLASS_NAME, 'base-search-card__subtitle').text.strip()
             location = job.find_element(By.CLASS_NAME, 'job-search-card__location').text.strip()
@@ -370,7 +458,9 @@ def scrape_linkedin(keyword):
             job_description = description_element.text.lower()
             combined_text = f"{title.lower()} {job_description}"
 
-            posted_date = linkedin_format_posted_date(driver.find_element(By.CLASS_NAME, 'posted-time-ago__text').text.strip())
+            posted_date = linkedin_format_posted_date(
+                driver.find_element(By.CLASS_NAME, 'posted-time-ago__text').text.strip()
+            )
 
             employment_type = "N/A"
             seniority_level = "N/A"
@@ -389,10 +479,9 @@ def scrape_linkedin(keyword):
             else:
                 remote_option = "On-site"
 
-
             if posted_date == "N/A":
                 posted_date = None
-            
+
             save_job(
                 job_title=title, company_name=company, location=location,
                 job_url=link, employment_type=employment_type,
@@ -402,7 +491,9 @@ def scrape_linkedin(keyword):
             )
         except Exception as e:
             print(f"❌ Error scraping LinkedIn job: {e}")
+
     driver.quit()
+
 
 # === Utilities for Date Conversion ===
 def convert_posted_date_indeed(text):
@@ -432,19 +523,24 @@ def linkedin_format_posted_date(text):
 
 # === Main Entry ===
 if __name__ == "__main__":
-#    test_proxy_connection()
+    # driver = get_chrome_driver()
+    # driver.get("https://ph.indeed.com/jobs?q=marketing&l=Philippines")
+    # input("🛑 Solve the CAPTCHA manually, then press Enter here...")
+    # save_cookies(driver, "indeed_cookies.json")
+    # driver.quit()
+    # print("✅ Cookies saved.")
+    # test_proxy_connection()
     clear_scraped_jobs()
+
     keywords = [
-        "Business Analyst",
+        "Marketing","Business Analytics"
     ]
+
     for keyword in keywords:
-        scrape_linkedin(keyword)
         scrape_jobstreet(keyword)
-        scrape_indeed(keyword)
+        scrape_linkedin(keyword)
 
-
-
-
-
-
-
+        # ✅ Refresh driver per keyword (safely)
+        indeed_driver = get_chrome_driver(load_cookies_from="indeed_cookies.json")
+        scrape_indeed(keyword, driver=indeed_driver)
+        indeed_driver.quit()
